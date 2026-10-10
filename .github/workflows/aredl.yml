@@ -1,0 +1,40 @@
+name: Surveillance clan AREDL
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # toutes les 10 minutes (GitHub peut retarder un peu)
+  workflow_dispatch:           # permet aussi de le lancer a la main
+
+permissions:
+  contents: write              # pour sauvegarder seen_records.json dans le depot
+
+concurrency:
+  group: aredl-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer les dependances
+        run: pip install requests
+
+      - name: Verifier les records du clan
+        run: python aredl_clan_watch.py --once
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          PING: ${{ secrets.PING }}
+
+      - name: Sauvegarder la memoire des records vus
+        if: always()
+        run: |
+          git config user.name "aredl-watch"
+          git config user.email "aredl-watch@users.noreply.github.com"
+          git add seen_records.json
+          git diff --cached --quiet || (git commit -m "Mise a jour de la memoire" && git push)
