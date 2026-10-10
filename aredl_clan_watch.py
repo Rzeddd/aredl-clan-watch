@@ -75,7 +75,7 @@ def describe(label, record):
     if record.get("is_verification"):
         details.append("verification")
 
-    text = f"**{player}** a complete **{name}** ({' | '.join(details)})"
+    text = f"**{player}** s'est fait accept son **{name}** ({' | '.join(details)})"
     video = record.get("video_url")
     if video and not record.get("hide_video"):
         text += f"\n{video}"
