@@ -75,7 +75,9 @@ def describe(label, record):
     if record.get("is_verification"):
         details.append("verification")
 
-    text = f"**{player}** s'est fait accept son **{name}** ({' | '.join(details)})"
+    discord_id = str(user.get("discord_id") or "")
+    who = f"<@{discord_id}>" if discord_id.isdigit() else f"**{player}**"
+    text = f"{who} s'est fait accept son **{name}** ({' | '.join(details)})"
     video = record.get("video_url")
     if video and not record.get("hide_video"):
         text += f"\n{video}"
