@@ -4,12 +4,16 @@ message avec ping dans un salon Discord quand un nouveau record apparait.
 
 Pas besoin de creer un bot Discord : le script utilise un webhook de salon.
 
+Important : l'API ne liste qu'UNE entree par niveau pour le clan, avec un compteur
+(completion_count). Quand un deuxieme membre complete un niveau deja fait par le clan,
+seul le compteur augmente. Le script detecte cette hausse, puis demande la liste
+complete des victoires du clan sur ce niveau pour annoncer la nouvelle.
+
 Installation :
     pip install requests
 
 Configuration (variables d'environnement, ou modifie les valeurs ci-dessous) :
     WEBHOOK_URL   URL du webhook du salon
-                  (Parametres du salon > Integrations > Webhooks > Nouveau webhook)
     PING          Ce qui est ping : "<@&ID_DU_ROLE>" pour un role, "" pour personne
     CLAN_ID       Identifiant du clan (deja rempli pour TAF)
     CHECK_EVERY   Delai entre deux verifications, en secondes (600 par defaut)
@@ -35,26 +39,20 @@ PING = os.getenv("PING", "")  # ex. "<@&123456789012345678>"
 CLAN_ID = os.getenv("CLAN_ID", "7860e081-b5bf-4546-8a13-85b7f3121c50")
 
 API_BASE = "https://api.aredl.net/v2/api"
-SOURCES = {
-    "Classic": f"{API_BASE}/aredl/clan/{CLAN_ID}",
-    "Platformer": f"{API_BASE}/arepl/clan/{CLAN_ID}",
-}
+SOURCES = {"Classic": "aredl", "Platformer": "arepl"}
 
 CHECK_EVERY_SECONDS = int(os.getenv("CHECK_EVERY", "600"))
 STATE_FILE = Path(os.getenv("STATE_FILE", "seen_records.json"))
 DRY_RUN = os.getenv("DRY_RUN") == "1"
-HEADERS = {"User-Agent": "aredl-clan-watch/1.1"}
+HEADERS = {"User-Agent": "aredl-clan-watch/1.2"}
 
 # ------------------------------------------------------------------ CODE ----
 
 
-def fetch_records(url):
-    response = requests.get(url, headers=HEADERS, timeout=20)
+def api_get(path):
+    response = requests.get(f"{API_BASE}/{path}", headers=HEADERS, timeout=20)
     response.raise_for_status()
-    records = response.json().get("records")
-    if not isinstance(records, list):
-        raise ValueError("Reponse inattendue : pas de liste 'records'.")
-    return records
+    return response.json()
 
 
 def describe(label, record):
@@ -85,17 +83,31 @@ def describe(label, record):
 
 
 def load_state():
-    if STATE_FILE.exists():
-        try:
-            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-            return {label: set(ids) for label, ids in data.items()}
-        except (json.JSONDecodeError, OSError, AttributeError):
-            print("Fichier d'etat illisible, il sera recree.", file=sys.stderr)
-    return {}
+    """Etat = pour chaque liste : ids de records vus + compteur de victoires par niveau."""
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        raw = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        state = {}
+        for label, value in raw.items():
+            if isinstance(value, list):  # ancien format : simple liste d'identifiants
+                state[label] = {"ids": set(value), "counts": None}
+            else:
+                state[label] = {
+                    "ids": set(value.get("ids", [])),
+                    "counts": dict(value.get("counts", {})),
+                }
+        return state
+    except (json.JSONDecodeError, OSError, AttributeError):
+        print("Fichier d'etat illisible, il sera recree.", file=sys.stderr)
+        return {}
 
 
 def save_state(state):
-    data = {label: sorted(ids) for label, ids in state.items()}
+    data = {
+        label: {"ids": sorted(s["ids"]), "counts": s["counts"] or {}}
+        for label, s in state.items()
+    }
     STATE_FILE.write_text(json.dumps(data), encoding="utf-8")
 
 
@@ -117,34 +129,88 @@ def post_to_discord(content):
     raise RuntimeError("Discord a refuse l'envoi (limite de debit).")
 
 
-def check_source(label, url, state):
-    records = fetch_records(url)
-    current = {r["id"]: r for r in records if r.get("id")}
+def check_source(label, kind, state):
+    data = api_get(f"{kind}/clan/{CLAN_ID}")
+    entries = [
+        e for e in data.get("records", [])
+        if e.get("id") and (e.get("level") or {}).get("id")
+    ]
 
     if label not in state:
         # Premier passage : on memorise l'existant sans rien envoyer.
-        state[label] = set(current)
+        state[label] = {
+            "ids": {e["id"] for e in entries},
+            "counts": {e["level"]["id"]: e.get("completion_count") or 1 for e in entries},
+        }
         save_state(state)
-        print(f"[{label}] Premier passage : {len(current)} records memorises, rien envoye.")
+        print(f"[{label}] Premier passage : {len(entries)} niveaux memorises, rien envoye.")
         return
 
-    new_ids = [rid for rid in current if rid not in state[label]]
-    # Les plus anciens d'abord, pour que le salon reste dans l'ordre chronologique.
-    new_ids.sort(key=lambda rid: current[rid].get("achieved_at") or "")
-    for rid in new_ids:
-        content = f"{PING} Nouveau record dans le clan !\n{describe(label, current[rid])}"
+    st = state[label]
+    if st["counts"] is None:
+        # Migration depuis l'ancien format : on memorise le compteur de tous les niveaux
+        # existants, sans rien annoncer. Seule exception : une entree inconnue avec un
+        # seul record est un vrai nouveau niveau, elle sera annoncee normalement.
+        st["counts"] = {
+            e["level"]["id"]: e.get("completion_count") or 1
+            for e in entries
+            if e["id"] in st["ids"] or (e.get("completion_count") or 1) > 1
+        }
+        save_state(state)
+
+    pending = []         # records a annoncer : (date, record)
+    count_updates = {}   # niveau -> nouveau compteur, applique une fois les envois faits
+
+    for entry in entries:
+        level = entry["level"]
+        level_id = level["id"]
+        count = entry.get("completion_count") or 1
+        known = st["counts"].get(level_id, 0)
+
+        if count == known:
+            continue
+        if count < known:  # un record a ete retire : on se met simplement a jour
+            st["counts"][level_id] = count
+            continue
+
+        diff = count - known
+        if count == 1:
+            candidates = [entry]
+        else:
+            try:
+                victors = api_get(f"{kind}/clan/{CLAN_ID}/levels/{level_id}/records")
+            except Exception as error:  # on reessaiera au prochain passage
+                print(f"[{label}] Detail indisponible pour {level.get('name')} : {error}",
+                      file=sys.stderr)
+                continue
+            candidates = [dict(r, level=level) for r in victors]
+
+        unseen = [r for r in candidates if r.get("id") and r["id"] not in st["ids"]]
+        unseen.sort(key=lambda r: r.get("created_at") or r.get("achieved_at") or "")
+        cut = max(0, len(unseen) - diff)
+        st["ids"].update(r["id"] for r in unseen[:cut])  # anciens jamais vus : en silence
+        for record in unseen[cut:]:
+            pending.append((record.get("achieved_at") or "", record))
+        count_updates[level_id] = count
+
+    pending.sort(key=lambda item: item[0])
+    for _, record in pending:
+        content = f"{PING} Nouveau record dans le clan !\n{describe(label, record)}"
         post_to_discord(content.strip())
-        state[label].add(rid)
+        st["ids"].add(record["id"])
         save_state(state)  # sauvegarde apres chaque envoi pour ne jamais doubler
         time.sleep(1)
-    if new_ids:
-        print(f"[{label}] {len(new_ids)} nouveau(x) record(s) annonce(s).")
+
+    st["counts"].update(count_updates)
+    save_state(state)
+    if pending:
+        print(f"[{label}] {len(pending)} nouveau(x) record(s) annonce(s).")
 
 
 def check_all(state):
-    for label, url in SOURCES.items():
+    for label, kind in SOURCES.items():
         try:
-            check_source(label, url, state)
+            check_source(label, kind, state)
         except Exception as error:  # une erreur sur une liste ne bloque pas l'autre
             print(f"[{label}] Erreur pendant la verification : {error}", file=sys.stderr)
 
