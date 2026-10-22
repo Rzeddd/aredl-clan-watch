@@ -1,0 +1,34 @@
+name: Envoyer un message
+
+on:
+  workflow_dispatch:
+    inputs:
+      message:
+        description: 'Texte du message (ecris \n pour un retour a la ligne)'
+        required: true
+        type: string
+      ping:
+        description: 'Ajouter le ping du role au debut du message'
+        type: boolean
+        default: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer les dependances
+        run: pip install requests
+
+      - name: Envoyer le message
+        run: python aredl_clan_watch.py --say
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          PING: ${{ secrets.PING }}
+          SAY_MESSAGE: ${{ inputs.message }}
+          SAY_PING: ${{ inputs.ping }}
