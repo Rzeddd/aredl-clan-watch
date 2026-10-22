@@ -22,6 +22,12 @@ Lancement :
     python aredl_clan_watch.py            # tourne en continu
     python aredl_clan_watch.py --once     # une seule verification puis stop
     DRY_RUN=1 python aredl_clan_watch.py --once   # affiche au lieu d'envoyer
+
+Envoyer un message libre dans le salon (sans verifier les records) :
+    python aredl_clan_watch.py --say "Salut tout le monde !"
+    python aredl_clan_watch.py --say "Ligne 1\\nLigne 2"     # \\n = retour a la ligne
+    python aredl_clan_watch.py --say "Reunion ce soir" --ping   # ajoute le ping PING
+Depuis GitHub : onglet Actions > "Envoyer un message" > Run workflow.
 """
 
 import json
@@ -111,13 +117,13 @@ def save_state(state):
     STATE_FILE.write_text(json.dumps(data), encoding="utf-8")
 
 
-def post_to_discord(content):
+def post_to_discord(content, mentions=("roles", "users", "everyone")):
     if DRY_RUN:
         print("[SIMULATION] Message qui serait envoye :\n" + content + "\n")
         return
     payload = {
         "content": content,
-        "allowed_mentions": {"parse": ["roles", "users", "everyone"]},
+        "allowed_mentions": {"parse": list(mentions)},
     }
     for _ in range(2):
         response = requests.post(WEBHOOK_URL, json=payload, timeout=20)
@@ -215,9 +221,32 @@ def check_all(state):
             print(f"[{label}] Erreur pendant la verification : {error}", file=sys.stderr)
 
 
+def say():
+    """Envoie un message libre dans le salon (mode --say)."""
+    args = sys.argv[sys.argv.index("--say") + 1:]
+    with_ping = "--ping" in args or os.getenv("SAY_PING", "").lower() == "true"
+    text = " ".join(a for a in args if a != "--ping") or os.getenv("SAY_MESSAGE", "")
+    text = text.replace("\\n", "\n").strip()  # "\n" tape a la main = retour a la ligne
+    if not text:
+        sys.exit('Message vide. Exemple : python aredl_clan_watch.py --say "Salut !"')
+
+    content = f"{PING} {text}" if with_ping and PING else text
+    if len(content) > 2000:
+        sys.exit(f"Message trop long ({len(content)} caracteres, Discord accepte 2000 maximum).")
+
+    # Les mentions de roles et de membres fonctionnent, pas @everyone/@here (securite).
+    post_to_discord(content, mentions=("roles", "users"))
+    if not DRY_RUN:
+        print("Message envoye.")
+
+
 def main():
     if not DRY_RUN and "COLLE_" in WEBHOOK_URL:
         sys.exit("Renseigne WEBHOOK_URL (ou lance avec DRY_RUN=1 pour tester).")
+
+    if "--say" in sys.argv:
+        say()
+        return
 
     state = load_state()
     if "--once" in sys.argv:
