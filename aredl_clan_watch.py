@@ -201,7 +201,7 @@ def check_source(label, kind, state):
 
     pending.sort(key=lambda item: item[0])
     for _, record in pending:
-        content = f"{PING} Nouveau record dans le clan !\n{describe(label, record)}"
+        content = f"Nouveau record dans le clan !\n{describe(label, record)}"
         post_to_discord(content.strip())
         st["ids"].add(record["id"])
         save_state(state)  # sauvegarde apres chaque envoi pour ne jamais doubler
